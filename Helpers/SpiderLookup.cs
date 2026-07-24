@@ -61,7 +61,7 @@ internal static class SpiderLookup
         CHAR_Unholy_UnstableArachnid_Small
     };
 
-    // Spider type → furniture GUID hash
+    // Spider type to furniture GUID hash
     static readonly Dictionary<int, int> SpiderToFurniture = new()
     {
         // Melee spiders
@@ -94,15 +94,21 @@ internal static class SpiderLookup
         { CHAR_Unholy_UnstableArachnid, TM_Castle_Module_Child_RoundTable_6x6_StrongbladeDLC03 },
         { CHAR_Unholy_UnstableArachnid_Small, TM_Castle_Module_Child_RoundTable_3x3_StrongbladeDLC03 },
 
-        // Player spider shapeshift buff → furniture
+        // Player spider shapeshift buff to furniture
     };
 
     // Buff GUIDs
     internal const int AB_Shapeshift_Spider_Buff = 124832551;
+    internal const int AB_Shapeshift_Spider_Burrow_Buff = -1665328650;
 
     static readonly HashSet<int> SpiderBuffHashes = new()
     {
         AB_Shapeshift_Spider_Buff
+    };
+
+    static readonly HashSet<int> BurrowBuffHashes = new()
+    {
+        AB_Shapeshift_Spider_Burrow_Buff
     };
 
     static readonly Dictionary<int, int> BuffToFurniture = new()
@@ -113,6 +119,8 @@ internal static class SpiderLookup
     public static bool IsSpider(int guidHash) => SpiderGuidHashes.Contains(guidHash);
 
     public static bool IsSpiderBuff(int buffGuidHash) => SpiderBuffHashes.Contains(buffGuidHash);
+
+    public static bool IsBurrowBuff(int buffGuidHash) => BurrowBuffHashes.Contains(buffGuidHash);
 
     public static int GetFurnitureGuidHash(int spiderGuidHash)
     {

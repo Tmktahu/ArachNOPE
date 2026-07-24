@@ -32,6 +32,9 @@ internal static class SpiderHidePatch
     // Player-spider tracking (player entity -> furniture entity)
     internal static readonly Dictionary<Entity, Entity> _playerSpiders = new();
 
+    // Tracks which tracked spider players are currently burrowed (furniture hidden)
+    static readonly Dictionary<Entity, bool> _playerBurrowed = new();
+
     // Tracks buff entities we've already processed (to avoid duplicates in trigger)
     static readonly HashSet<Entity> _seenPlayerBuffs = new();
 
@@ -45,6 +48,16 @@ internal static class SpiderHidePatch
     static readonly Dictionary<Entity, GameObject> _disabledPlayerModels = new();
     // Players whose model hasn't been hidden yet (retry in SyncPositions)
     static readonly HashSet<Entity> _pendingHidePlayers = new();
+
+    // Frame throttle counter for world-change stabilization
+    static int _framesSinceWorldChange;
+
+    [HarmonyPrefix]
+    [HarmonyPatch(typeof(ClientBootstrapSystem), nameof(ClientBootstrapSystem.OnDestroy))]
+    static void OnClientDisconnect(ClientBootstrapSystem __instance)
+    {
+        ResetState();
+    }
 
     [HarmonyPostfix]
     [HarmonyPatch(typeof(HybridEquipmentSystem), nameof(HybridEquipmentSystem.OnUpdate))]
@@ -65,13 +78,22 @@ internal static class SpiderHidePatch
             return;
         }
 
-        // World changed (reconnect/scene load) — reset everything
+        // World changed (reconnect/scene load) — reset everything and wait
+        // for the new world to stabilize before re-initializing
         if (_emReady && __instance.World != _clientWorld)
+        {
             ResetState();
+            _framesSinceWorldChange = 0;
+            return;
+        }
 
-        // Initialize on first valid frame (not throttled)
+        // Initialize on a new world after a 3-frame throttle to let the
+        // world finish constructing before we query its systems
         if (!_emReady)
         {
+            _framesSinceWorldChange++;
+            if (_framesSinceWorldChange < 3) return;
+
             try
             {
                 _clientWorld = __instance.World;
@@ -82,6 +104,7 @@ internal static class SpiderHidePatch
             catch
             {
                 ResetState();
+                _framesSinceWorldChange = 0;
                 return;
             }
         }
@@ -93,7 +116,7 @@ internal static class SpiderHidePatch
         {
             _buffScanCounter = 0;
             try { SafetyScanBuffs(__instance.EntityManager); }
-            catch { }
+            catch { ResetState(); }
         }
 
         // Position sync for tracked furniture (runs every frame, early-exits if empty)
@@ -121,23 +144,36 @@ internal static class SpiderHidePatch
             _buffQueryCreated = true;
         }
 
+        if (_clientWorld == null || !_clientWorld.IsCreated)
+        {
+            ResetState();
+            return;
+        }
+
         NativeArray<Entity> buffs = default;
         try
         {
             buffs = _buffQuery.ToEntityArray(Allocator.Temp);
 
-            // Build set of currently-active spider buff entities
+            // Build set of currently-active spider buff entities and burrow buffs
             var activeBuffs = new HashSet<Entity>();
+            var activeBurrows = new Dictionary<Entity, bool>();
 
             foreach (var buffEntity in buffs)
             {
                 if (!em.HasComponent<PrefabGUID>(buffEntity)) continue;
                 int guidHash = em.GetComponentData<PrefabGUID>(buffEntity).GuidHash;
-                if (!SpiderLookup.IsSpiderBuff(guidHash)) continue;
+                if (!SpiderLookup.IsSpiderBuff(guidHash) && !SpiderLookup.IsBurrowBuff(guidHash)) continue;
 
                 Entity target = em.GetComponentData<Buff>(buffEntity).Target;
                 if (!em.Exists(target)) continue;
                 if (!em.HasComponent<PlayerCharacter>(target)) continue;
+
+                if (SpiderLookup.IsBurrowBuff(guidHash))
+                {
+                    activeBurrows[target] = true;
+                    continue;
+                }
 
                 activeBuffs.Add(buffEntity);
 
@@ -154,7 +190,53 @@ internal static class SpiderHidePatch
                     _playerSpiders[target] = furnitureEntity;
             }
 
-            // Check for removed buffs by comparing against active set
+            // Handle burrow state changes for tracked spider players.
+            // Use separate lists to avoid modifying dictionaries during iteration.
+            var burrowingPlayers = new List<Entity>();
+            var unburrowingPlayers = new List<Entity>();
+
+            foreach (var kvp in _playerSpiders)
+            {
+                if (activeBurrows.ContainsKey(kvp.Key))
+                    burrowingPlayers.Add(kvp.Key);
+            }
+
+            foreach (var playerEntity in _playerBurrowed.Keys)
+            {
+                if (!activeBurrows.ContainsKey(playerEntity))
+                    unburrowingPlayers.Add(playerEntity);
+            }
+
+            foreach (var playerEntity in burrowingPlayers)
+            {
+                if (_playerSpiders.TryGetValue(playerEntity, out var furnitureEntity))
+                {
+                    try
+                    {
+                        if (em.Exists(furnitureEntity))
+                            em.DestroyEntity(furnitureEntity);
+                    }
+                    catch { }
+                    _playerSpiders.Remove(playerEntity);
+                }
+                _playerBurrowed[playerEntity] = true;
+            }
+
+            foreach (var playerEntity in unburrowingPlayers)
+            {
+                _playerBurrowed.Remove(playerEntity);
+
+                int spiderBuffHash = SpiderLookup.AB_Shapeshift_Spider_Buff;
+                Entity newFurniture = Entity.Null;
+                bool spawned = TrySpawnFurniture(em, playerEntity, spiderBuffHash, out newFurniture);
+                if (spawned)
+                {
+                    _playerSpiders[playerEntity] = newFurniture;
+                    _pendingHidePlayers.Add(playerEntity);
+                }
+            }
+
+            // Check for removed spider buffs by comparing against active set
             if (_buffToPlayer.Count > 0)
             {
                 var deadBuffs = new List<Entity>();
@@ -167,6 +249,9 @@ internal static class SpiderHidePatch
                 foreach (var buffEntity in deadBuffs)
                 {
                     var playerEntity = _buffToPlayer[buffEntity];
+
+                    // Clean up burrow tracking if present
+                    _playerBurrowed.Remove(playerEntity);
 
                     if (_playerSpiders.TryGetValue(playerEntity, out var furnitureEntity))
                     {
@@ -202,6 +287,14 @@ internal static class SpiderHidePatch
                 ComponentType.ReadOnly<Health>(),
                 ComponentType.ReadOnly<Team>());
             _npcQueryCreated = true;
+        }
+
+        // Safety guard: if the world was destroyed since our last check,
+        // the query is stale and ToEntityArray will AV crash
+        if (_clientWorld == null || !_clientWorld.IsCreated)
+        {
+            ResetState();
+            return;
         }
 
         NativeArray<Entity> entities = default;
@@ -389,6 +482,29 @@ internal static class SpiderHidePatch
             {
                 if (!em.HasComponent<PrefabGUID>(buffEntity)) continue;
                 int guidHash = em.GetComponentData<PrefabGUID>(buffEntity).GuidHash;
+
+                if (SpiderLookup.IsBurrowBuff(guidHash))
+                {
+                    Entity burrowTarget = em.GetComponentData<Buff>(buffEntity).Target;
+                    if (!em.Exists(burrowTarget)) continue;
+                    if (!em.HasComponent<PlayerCharacter>(burrowTarget)) continue;
+
+                    if (_playerBurrowed.ContainsKey(burrowTarget)) continue;
+
+                    if (_playerSpiders.TryGetValue(burrowTarget, out var furnEntity))
+                    {
+                        try
+                        {
+                            if (em.Exists(furnEntity))
+                                em.DestroyEntity(furnEntity);
+                        }
+                        catch { }
+                        _playerSpiders.Remove(burrowTarget);
+                    }
+                    _playerBurrowed[burrowTarget] = true;
+                    continue;
+                }
+
                 if (!SpiderLookup.IsSpiderBuff(guidHash)) continue;
 
                 Entity target = em.GetComponentData<Buff>(buffEntity).Target;
@@ -702,11 +818,26 @@ internal static class SpiderHidePatch
         _prefabCollectionSystem = null;
         _clientWorld = null;
         _rehideCounter = 0;
+        _buffScanCounter = 0;
+        _framesSinceWorldChange = 0;
         _hybridModelSystem = null;
-        _buffQueryCreated = false;
+
+        // Dispose stale entity queries so they aren't reused with a new
+        // world's EntityManager (native ECS access violation if mismatched)
+        if (_buffQueryCreated)
+        {
+            try { _buffQuery.Dispose(); } catch { }
+            _buffQueryCreated = false;
+        }
+        if (_npcQueryCreated)
+        {
+            try { _npcQuery.Dispose(); } catch { }
+            _npcQueryCreated = false;
+        }
 
         _tracked.Clear();
         _playerSpiders.Clear();
+        _playerBurrowed.Clear();
         _seenPlayerBuffs.Clear();
         _buffToPlayer.Clear();
         _pendingHidePlayers.Clear();
@@ -776,8 +907,11 @@ internal static class SpiderHidePatch
 
         _tracked.Clear();
         _playerSpiders.Clear();
+        _playerBurrowed.Clear();
         _seenPlayerBuffs.Clear();
         _buffToPlayer.Clear();
+
+        // ResetState handles query disposal + all flag resets
         ResetState();
     }
 }

@@ -120,61 +120,62 @@ internal static class SpiderBuffPatch
         }
     }
 
-    [HarmonyPostfix]
-    [HarmonyPatch(typeof(UpdateBuffsBuffer_Destroy), nameof(UpdateBuffsBuffer_Destroy.OnUpdate))]
-    static void OnBuffRemovePostfix(UpdateBuffsBuffer_Destroy __instance)
-    {
-        if (!_initialized)
-        {
-            Plugin.Logger.LogInfo("[ArachNOPE][SysPatch] Buff remove patch: not initialized yet");
-            return;
-        }
+    // REDUNDANT: replaced by SafetyScanBuffs(active-set comparison in SpiderHidePatch.cs)
+    // [HarmonyPostfix]
+    // [HarmonyPatch(typeof(UpdateBuffsBuffer_Destroy), nameof(UpdateBuffsBuffer_Destroy.OnUpdate))]
+    // static void OnBuffRemovePostfix(UpdateBuffsBuffer_Destroy __instance)
+    // {
+    //     if (!_initialized)
+    //     {
+    //         Plugin.Logger.LogInfo("[ArachNOPE][SysPatch] Buff remove patch: not initialized yet");
+    //         return;
+    //     }
 
-        _removeFireCount++;
-        Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] UpdateBuffsBuffer_Destroy.OnUpdate fired ({_removeFireCount}), tracking {_buffToPlayer.Count} buffs");
+    //     _removeFireCount++;
+    //     Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] UpdateBuffsBuffer_Destroy.OnUpdate fired ({_removeFireCount}), tracking {_buffToPlayer.Count} buffs");
 
-        if (_buffToPlayer.Count == 0) return;
+    //     if (_buffToPlayer.Count == 0) return;
 
-        var em = __instance.EntityManager;
-        EntityQuery query = default;
-        NativeArray<Entity> destroyedEntities = default;
+    //     var em = __instance.EntityManager;
+    //     EntityQuery query = default;
+    //     NativeArray<Entity> destroyedEntities = default;
 
-        try
-        {
-            query = em.CreateEntityQuery(
-                ComponentType.ReadOnly<PrefabGUID>(),
-                ComponentType.ReadOnly<Buff>());
-            destroyedEntities = query.ToEntityArray(Allocator.Temp);
+    //     try
+    //     {
+    //         query = em.CreateEntityQuery(
+    //             ComponentType.ReadOnly<PrefabGUID>(),
+    //             ComponentType.ReadOnly<Buff>());
+    //         destroyedEntities = query.ToEntityArray(Allocator.Temp);
 
-            Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] Destroy query found {destroyedEntities.Length} entities");
+    //         Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] Destroy query found {destroyedEntities.Length} entities");
 
-            var destroyedSet = new HashSet<Entity>();
-            foreach (var entity in destroyedEntities)
-                destroyedSet.Add(entity);
+    //         var destroyedSet = new HashSet<Entity>();
+    //         foreach (var entity in destroyedEntities)
+    //             destroyedSet.Add(entity);
 
-            var toRemove = new List<Entity>();
-            foreach (var kvp in _buffToPlayer)
-            {
-                var buffEntity = kvp.Key;
-                var playerEntity = kvp.Value;
+    //         var toRemove = new List<Entity>();
+    //         foreach (var kvp in _buffToPlayer)
+    //         {
+    //             var buffEntity = kvp.Key;
+    //             var playerEntity = kvp.Value;
 
-                if (destroyedSet.Contains(buffEntity))
-                {
-                    Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] Buff removed for player {playerEntity.Index}:{playerEntity.Version}");
-                    HandleBuffRemoval(em, playerEntity);
-                    toRemove.Add(buffEntity);
-                }
-            }
+    //             if (destroyedSet.Contains(buffEntity))
+    //             {
+    //                 Plugin.Logger.LogInfo($"[ArachNOPE][SysPatch] Buff removed for player {playerEntity.Index}:{playerEntity.Version}");
+    //                 HandleBuffRemoval(em, playerEntity);
+    //                 toRemove.Add(buffEntity);
+    //             }
+    //         }
 
-            foreach (var buffEntity in toRemove)
-                _buffToPlayer.Remove(buffEntity);
-        }
-        finally
-        {
-            if (destroyedEntities.IsCreated) destroyedEntities.Dispose();
-            try { query.Dispose(); } catch { }
-        }
-    }
+    //         foreach (var buffEntity in toRemove)
+    //             _buffToPlayer.Remove(buffEntity);
+    //     }
+    //     finally
+    //     {
+    //         if (destroyedEntities.IsCreated) destroyedEntities.Dispose();
+    //         try { query.Dispose(); } catch { }
+    //     }
+    // }
 
     static void HandleBuffRemoval(EntityManager em, Entity playerEntity)
     {
